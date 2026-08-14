@@ -43,6 +43,10 @@ from ._schema import (
     UploadKnowledgeDocumentResponse,
 )
 from ...credential import CredentialFactory
+from .._service._live_catalog import (
+    embedding_cards_from_ids,
+    probe_openai_compatible_ids,
+)
 from ..rag.knowledge_base_manager import KnowledgeBaseManagerBase
 from .._service import (
     KnowledgeBaseService,
@@ -115,8 +119,24 @@ async def list_kb_embedding_models(
         if embedding_cls is None:
             continue
 
+        catalog = embedding_cls.list_models()
+        try:
+            record = await access.resolve_credential(user_id, credential.id)
+            live_credential = CredentialFactory.from_dict(record.data)
+            live = embedding_cards_from_ids(
+                await probe_openai_compatible_ids(
+                    live_credential,
+                    cache_key=credential.id,
+                ),
+                embedding_cls.Parameters,
+            )
+        except Exception:  # pylint: disable=broad-except
+            live = []
+        if live:
+            catalog = live
+
         filtered = []
-        for card in embedding_cls.list_models():
+        for card in catalog:
             projected = policy.filter_card(card)
             if projected is not None:
                 filtered.append(projected)

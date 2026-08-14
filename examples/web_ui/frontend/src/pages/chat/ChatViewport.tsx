@@ -10,6 +10,8 @@ import {
 	UsersRound,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 
 import type {
 	ChatModelConfig,
@@ -170,8 +172,10 @@ function closePanelInLayout(layout: PanelKey[][], key: PanelKey): PanelKey[][] {
  */
 export function ChatViewport({ agentId, sessionId, onTeamUpdated }: ChatViewportProps) {
 	const { t } = useTranslation();
-	const { sessions, refetch: refetchSessions } = useSessions(agentId);
+	const navigate = useNavigate();
+	const { sessions, refetch: refetchSessions, create: createSession } = useSessions(agentId);
 	const { groups } = useAvailableModels();
+	const pendingModelRef = useRef<ChatModelConfig | null>(null);
 
 	const [selectedModel, setSelectedModel] = useState<ChatModelConfig | null>(null);
 	const [selectedFallbackModel, setSelectedFallbackModel] = useState<ChatModelConfig | null>(
@@ -302,14 +306,16 @@ export function ChatViewport({ agentId, sessionId, onTeamUpdated }: ChatViewport
 	 */
 	const patchConfig = useCallback(
 		async (body: UpdateSessionRequest, apply: () => void) => {
-			if (!sessionId || !agentId) return;
+			if (!sessionId || !agentId) return false;
 			setConfigPending(true);
 			try {
 				await sessionApi.update(sessionId, agentId, body);
 				apply();
 				await refetchSessions();
+				return true;
 			} catch {
 				// Toast already shown; local state deliberately untouched.
+				return false;
 			} finally {
 				setConfigPending(false);
 			}
@@ -485,7 +491,9 @@ export function ChatViewport({ agentId, sessionId, onTeamUpdated }: ChatViewport
 	// before `view` repopulates — and an immediate send would post to
 	// a session whose backend config doesn't actually have that model.
 	useEffect(() => {
-		setSelectedModel(null);
+		if (!pendingModelRef.current) {
+			setSelectedModel(null);
+		}
 		setSelectedFallbackModel(null);
 		setSelectedTTSModel(null);
 		setSelectedKnowledgeConfig(null);
@@ -567,6 +575,17 @@ export function ChatViewport({ agentId, sessionId, onTeamUpdated }: ChatViewport
 	useEffect(() => {
 		if (!view) return;
 		const sessionModel = view.session.config.chat_model_config;
+		const pending = pendingModelRef.current;
+		if (pending) {
+			setSelectedModel(pending);
+			if (
+				sessionModel?.model === pending.model &&
+				sessionModel?.credential_id === pending.credential_id
+			) {
+				pendingModelRef.current = null;
+			}
+			return;
+		}
 
 		if (sessionModel) {
 			setSelectedModel(sessionModel);
@@ -617,7 +636,37 @@ export function ChatViewport({ agentId, sessionId, onTeamUpdated }: ChatViewport
 	 */
 	const handleLlmChange = async (config: ChatModelConfig | null) => {
 		if (!config) return;
-		await patchConfig({ chat_model_config: config }, () => setSelectedModel(config));
+		const previous = selectedModel;
+		pendingModelRef.current = config;
+		setSelectedModel(config);
+
+		if (sessionId && agentId) {
+			const ok = await patchConfig({ chat_model_config: config }, () => undefined);
+			if (!ok) {
+				pendingModelRef.current = null;
+				setSelectedModel(previous);
+			}
+			return;
+		}
+
+		if (!agentId) {
+			toast.error(t('llm-select.needAgent'));
+			return;
+		}
+
+		setConfigPending(true);
+		try {
+			const res = await createSession({
+				agent_id: agentId,
+				chat_model_config: config,
+			});
+			navigate(`/chat/${agentId}/${res.session_id}`);
+		} catch {
+			pendingModelRef.current = null;
+			setSelectedModel(previous);
+		} finally {
+			setConfigPending(false);
+		}
 	};
 
 	/**
@@ -803,7 +852,7 @@ export function ChatViewport({ agentId, sessionId, onTeamUpdated }: ChatViewport
 									git={workspaceStatus?.git ?? null}
 									onRefreshGit={refetchWorkspaceStatus}
 									phase={phase}
-									disabled={selectedModel === null}
+									disabled={!view?.session.config.chat_model_config}
 									onSend={send}
 									onUserConfirm={onUserConfirm}
 									onInterrupt={interrupt}

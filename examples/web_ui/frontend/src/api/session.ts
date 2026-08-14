@@ -115,6 +115,7 @@ export const sessionApi = {
 			method: 'GET',
 			params: { agent_id: agentId },
 			signal,
+			silent: true,
 		});
 
 		const reader = res.body!.getReader();

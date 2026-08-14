@@ -14,9 +14,12 @@ Two entry points are provided:
   already holds the KB owner's :class:`CredentialRecord`) and by
   :func:`get_embedding_model` under the hood.
 """
+import inspect
+
 from fastapi import HTTPException, status
 
 from ._access import ResourceAccessService
+from ._live_catalog import openai_compat_pass_dimensions
 from ..storage import CredentialRecord, EmbeddingModelConfig
 from ...credential import CredentialFactory
 from ...embedding import EmbeddingModelBase
@@ -88,6 +91,12 @@ def build_embedding_model(
     }
     if context_size is not None:
         kwargs["context_size"] = context_size
+    # BGE-style hosts reject OpenAI's optional ``dimensions`` field.
+    init_params = inspect.signature(embedding_cls.__init__).parameters
+    if "pass_dimensions" in init_params:
+        kwargs["pass_dimensions"] = openai_compat_pass_dimensions(
+            config.model,
+        )
 
     return embedding_cls(**kwargs)
 
