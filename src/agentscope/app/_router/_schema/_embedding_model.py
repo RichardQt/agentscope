@@ -21,3 +21,11 @@ class ListEmbeddingModelsRequest(BaseModel):
     provider: str = Field(
         description="The provider type, e.g. openai, dashscope, etc.",
     )
+    credential_id: str | None = Field(
+        default=None,
+        description=(
+            "When set, probe the credential's endpoint (``GET /models``) "
+            "so OpenAI-compatible hosts such as SiliconFlow return their "
+            "own embedding ids instead of the built-in OpenAI catalog."
+        ),
+    )

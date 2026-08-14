@@ -8,21 +8,20 @@ export interface CredentialWithTTSModels {
 	models: TTSModelCard[];
 }
 
-/**
- * Fetches all credentials and their available TTS models, grouped by provider type.
- * Credentials/providers that expose no TTS models are omitted.
- */
-export function useAvailableTTSModels() {
-	const [groups, setGroups] = useState<Record<string, CredentialWithTTSModels[]>>({});
-	const [loading, setLoading] = useState(false);
-	const [error, setError] = useState<Error | null>(null);
+type Groups = Record<string, CredentialWithTTSModels[]>;
 
-	const refetch = useCallback(async () => {
-		setLoading(true);
-		setError(null);
-		try {
-			const { credentials } = await credentialApi.list();
-			const result: Record<string, CredentialWithTTSModels[]> = {};
+const CACHE_TTL_MS = 5 * 60_000;
+let cached: { at: number; data: Groups } | null = null;
+let inflight: Promise<Groups> | null = null;
+
+async function loadGroups(): Promise<Groups> {
+	if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
+		return cached.data;
+	}
+	if (!inflight) {
+		inflight = (async () => {
+			const { credentials } = await credentialApi.list({ silent: true });
+			const result: Groups = {};
 
 			await Promise.all(
 				credentials.map(async (credential) => {
@@ -30,7 +29,9 @@ export function useAvailableTTSModels() {
 					if (!type) return;
 					if (!result[type]) result[type] = [];
 					try {
-						const { models } = await ttsModelApi.list(type);
+						const { models } = await ttsModelApi.list(type, credential.id, {
+							silent: true,
+						});
 						if (models.length > 0) {
 							result[type].push({ credential, models });
 						}
@@ -40,12 +41,34 @@ export function useAvailableTTSModels() {
 				}),
 			);
 
-			// Remove provider groups with no TTS models
 			for (const key of Object.keys(result)) {
 				if (result[key].length === 0) delete result[key];
 			}
 
-			setGroups(result);
+			cached = { at: Date.now(), data: result };
+			return result;
+		})().finally(() => {
+			inflight = null;
+		});
+	}
+	return inflight;
+}
+
+/**
+ * Fetches all credentials and their available TTS models, grouped by provider type.
+ * Credentials/providers that expose no TTS models are omitted.
+ */
+export function useAvailableTTSModels() {
+	const [groups, setGroups] = useState<Groups>(cached?.data ?? {});
+	const [loading, setLoading] = useState(!cached);
+	const [error, setError] = useState<Error | null>(null);
+
+	const refetch = useCallback(async () => {
+		const fresh = cached && Date.now() - cached.at < CACHE_TTL_MS;
+		if (!fresh) setLoading(true);
+		setError(null);
+		try {
+			setGroups(await loadGroups());
 		} catch (e) {
 			setError(e as Error);
 		} finally {

@@ -696,12 +696,9 @@ optional):
             # -----------------------------------------------------------------
             model_cfg = session_record.config.chat_model_config
             if not model_cfg:
-                raise HTTPException(
-                    status_code=404,
-                    detail=(
-                        f"No model configuration found for agent "
-                        f"{agent_id}"
-                    ),
+                raise RuntimeError(
+                    "No chat model is configured for this session. "
+                    "Select a model in the UI before sending a message.",
                 )
             model = await get_model(user_id, model_cfg, self._access)
 

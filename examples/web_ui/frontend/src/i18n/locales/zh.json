@@ -384,7 +384,11 @@
 		},
 		"addCredential": "添加凭证",
 		"clear": "清除选择",
-		"noFallback": "无兜底模型"
+		"noFallback": "无兜底模型",
+		"searchPlaceholder": "搜索模型",
+		"customPlaceholder": "自定义模型 ID，例如 Qwen/Qwen2.5-72B-Instruct",
+		"customApply": "使用该模型",
+		"needAgent": "请先创建一个智能体，再选择模型。"
 	},
 	"embedding-select": {
 		"placeholder": "选择 Embedding 模型",

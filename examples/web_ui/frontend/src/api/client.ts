@@ -1,7 +1,45 @@
 import { toast } from 'sonner';
 
-export const getBaseUrl = () => localStorage.getItem('server_url') ?? '';
+/** Vite dev-server prefix proxied to the AgentScope backend. Same origin, no CORS preflight. */
+const DEV_API_PREFIX = '/as-api';
+
+/**
+ * Stored backend origin, rewritten in Vite dev so API calls stay same-origin.
+ *
+ * The chat page already holds one SSE slot; a cross-origin `X-User-ID`
+ * header would add an OPTIONS preflight to every request and exhaust
+ * Chrome's 6-connection HTTP/1.1 limit. Setup still probes the raw
+ * address via an explicit `baseUrl` override.
+ */
+export const getBaseUrl = () => {
+	const stored = localStorage.getItem('server_url') ?? '';
+	if (!import.meta.env.DEV || typeof window === 'undefined' || !stored) {
+		return stored;
+	}
+	try {
+		const target = new URL(stored);
+		const here = window.location;
+		if (target.port === '8002' && here.port === '5173' && target.origin !== here.origin) {
+			return `${here.origin}${DEV_API_PREFIX}`;
+		}
+	} catch {
+		// Fall through and use the stored value as-is.
+	}
+	return stored;
+};
 export const getUserId = () => localStorage.getItem('username') ?? '';
+
+/**
+ * Join a server root and an absolute API path.
+ *
+ * `new URL('/sessions/x', 'http://host/as-api')` drops the `/as-api`
+ * prefix; concatenating keeps a proxied root intact.
+ */
+export function resolveApiUrl(path: string, base = getBaseUrl()): URL {
+	const root = base.replace(/\/+$/, '');
+	const suffix = path.startsWith('/') ? path : `/${path}`;
+	return new URL(`${root}${suffix}`);
+}
 
 /**
  * Structured error thrown for non-2xx HTTP responses.
@@ -56,6 +94,27 @@ async function extractErrorDetail(res: Response): Promise<string> {
 	return text || res.statusText;
 }
 
+function isAbort(e: unknown): boolean {
+	return e instanceof DOMException && e.name === 'AbortError';
+}
+
+function isTimeout(e: unknown): boolean {
+	return e instanceof DOMException && e.name === 'TimeoutError';
+}
+
+async function fetchWithRetry(url: string, init: RequestInit, signal?: AbortSignal): Promise<Response> {
+	try {
+		return await fetch(url, init);
+	} catch (e) {
+		if (isAbort(e) || isTimeout(e) || signal?.aborted) throw e;
+		// A crowded HTTP/1.1 pool (SSE + CORS preflight) can drop the first
+		// attempt; one short retry usually lands after a slot frees up.
+		await new Promise((r) => setTimeout(r, 200));
+		if (signal?.aborted) throw e;
+		return await fetch(url, init);
+	}
+}
+
 async function streamRequest(path: string, options: RequestOptions = {}): Promise<Response> {
 	const {
 		method = 'GET',
@@ -67,7 +126,7 @@ async function streamRequest(path: string, options: RequestOptions = {}): Promis
 		userId,
 		timeoutMs,
 	} = options;
-	const url = new URL(path, baseUrl ?? getBaseUrl());
+	const url = resolveApiUrl(path, baseUrl ?? getBaseUrl());
 	if (params) {
 		Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
 	}
@@ -80,22 +139,23 @@ async function streamRequest(path: string, options: RequestOptions = {}): Promis
 
 	let res: Response;
 	try {
-		res = await fetch(url.toString(), {
-			method,
-			headers: buildHeaders(body !== undefined, userId),
-			body: body ? JSON.stringify(body) : undefined,
-			signal: combined,
-		});
+		res = await fetchWithRetry(
+			url.toString(),
+			{
+				method,
+				headers: buildHeaders(body !== undefined, userId),
+				body: body ? JSON.stringify(body) : undefined,
+				signal: combined,
+			},
+			combined,
+		);
 	} catch (e) {
 		// An abort is the caller's own doing — pass it through untouched.
-		if (e instanceof DOMException && e.name === 'AbortError') throw e;
-		// A server that accepts the connection then stalls would otherwise
-		// leave the caller waiting forever.
-		const timedOut = e instanceof DOMException && e.name === 'TimeoutError';
+		if (isAbort(e)) throw e;
 		// Otherwise fetch only rejects when the request never reached the
 		// server: wrong address, DNS failure, refused connection, blocked
 		// preflight. Status 0 distinguishes that from any HTTP-level failure.
-		const error = timedOut
+		const error = isTimeout(e)
 			? new ApiError(TIMEOUT_STATUS, 'The server took too long to respond.')
 			: new ApiError(
 					0,

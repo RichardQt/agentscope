@@ -9,7 +9,8 @@ import type {
 } from './types';
 
 export const credentialApi = {
-	list: () => client.get<CredentialListResponse>('/credential/'),
+	list: (options?: { silent?: boolean }) =>
+		client.get<CredentialListResponse>('/credential/', undefined, options),
 
 	schemas: () => client.get<CredentialSchemasResponse>('/credential/schemas'),
 

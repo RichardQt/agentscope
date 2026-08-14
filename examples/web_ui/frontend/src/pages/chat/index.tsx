@@ -52,6 +52,7 @@ import {
 } from '@/components/ui/sidebar';
 import { AudioProvider } from '@/context/AudioContext';
 import { useAgents } from '@/hooks/useAgents';
+import { useAvailableModels } from '@/hooks/useAvailableModels';
 import { useSessions } from '@/hooks/useSessions';
 import { useTranslation } from '@/i18n/useI18n.ts';
 
@@ -96,6 +97,7 @@ const ChatPageInner = () => {
 	}>();
 	const { t } = useTranslation();
 	const { agents, refetch: refetchAgents, remove: removeAgent } = useAgents();
+	const { groups } = useAvailableModels();
 	const {
 		sessions,
 		refetch: refetchSessions,
@@ -164,11 +166,25 @@ const ChatPageInner = () => {
 	const handleCreateSession = async () => {
 		if (!urlAgentId) return;
 		const seedConfig = currentView?.session.config ?? sessions[0]?.session.config;
+		const firstType = Object.keys(groups)[0];
+		const firstGroup = firstType ? groups[firstType]?.[0] : undefined;
+		const firstRemote = firstGroup?.models[0];
+		const fallbackModel =
+			firstType && firstGroup && firstRemote
+				? {
+						type: firstType,
+						credential_id: firstGroup.credential.id,
+						model: firstRemote.name,
+						parameters: {},
+					}
+				: undefined;
 		const res = await createSession({
 			agent_id: urlAgentId,
 			...(seedConfig?.chat_model_config
 				? { chat_model_config: seedConfig.chat_model_config }
-				: {}),
+				: fallbackModel
+					? { chat_model_config: fallbackModel }
+					: {}),
 			...(seedConfig?.fallback_chat_model_config
 				? { fallback_chat_model_config: seedConfig.fallback_chat_model_config }
 				: {}),
