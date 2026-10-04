@@ -9,6 +9,7 @@ import {
 	DropdownMenuGroup,
 	DropdownMenuItem,
 	DropdownMenuLabel,
+	DropdownMenuPortal,
 	DropdownMenuSeparator,
 	DropdownMenuSub,
 	DropdownMenuSubContent,
@@ -19,6 +20,7 @@ import { Input } from '@/components/ui/input';
 import { useAvailableModels } from '@/hooks/useAvailableModels';
 import { useTranslation } from '@/i18n/useI18n.ts';
 import { cn } from '@/lib/utils';
+import { credentialLabel } from '@/utils/common';
 
 interface Props extends Omit<React.ComponentPropsWithoutRef<typeof Button>, 'onChange' | 'value'> {
 	value?: ChatModelConfig | null;
@@ -55,10 +57,15 @@ export function LlmSelect({
 	const { t } = useTranslation();
 	const [query, setQuery] = useState('');
 	const [customName, setCustomName] = useState('');
-	const hasOptions = Object.keys(groups).length > 0;
+	// Credentials whose model list failed to load come back with an empty
+	// `models` array; drop them so they don't render empty submenus
+	const groupEntries = Object.entries(groups)
+		.map(([type, items]) => [type, items.filter((i) => i.models.length > 0)] as const)
+		.filter(([, usable]) => usable.length > 0);
+	const hasOptions = groupEntries.length > 0;
 
 	useEffect(() => {
-		if (refetchTrigger !== undefined && refetchTrigger > 0) void refetch(true);
+		if (refetchTrigger !== undefined && refetchTrigger > 0) refetch();
 	}, [refetchTrigger, refetch]);
 
 	const handleSelect = (type: string, credentialId: string, model: string) => {
@@ -129,10 +136,7 @@ export function LlmSelect({
 			</DropdownMenuTrigger>
 			<DropdownMenuContent align="start" className="min-w-64 max-h-80 overflow-y-auto">
 				{hasOptions && (
-					<div
-						className="px-2 py-1.5"
-						onPointerDown={(e) => e.stopPropagation()}
-					>
+					<div className="px-2 py-1.5" onPointerDown={(e) => e.stopPropagation()}>
 						<Input
 							value={query}
 							onChange={(e) => setQuery(e.target.value)}
@@ -147,8 +151,8 @@ export function LlmSelect({
 						<p className="text-xs mt-1">{t('llm-select.empty.description')}</p>
 					</div>
 				) : (
-					Object.entries(groups).map(([type, items], idx) => {
-						const isSingle = items.length === 1;
+					groupEntries.map(([type, usable], idx) => {
+						const isSingle = usable.length === 1;
 						return (
 							<DropdownMenuGroup key={type}>
 								{idx > 0 && <DropdownMenuSeparator />}
@@ -156,13 +160,13 @@ export function LlmSelect({
 									{type.replace(/_credential$/, '')}
 								</DropdownMenuLabel>
 								{isSingle
-									? filterModels(items[0].models).map((m) => (
+									? filterModels(usable[0].models).map((m) => (
 											<DropdownMenuItem
 												key={m.name}
 												onSelect={() =>
 													handleSelect(
 														type,
-														items[0].credential.id,
+														usable[0].credential.id,
 														m.name,
 													)
 												}
@@ -170,15 +174,12 @@ export function LlmSelect({
 												{m.name}
 											</DropdownMenuItem>
 										))
-									: items.map(({ credential, models }) => {
-											const credName =
-												(credential.data.name as string) ||
-												credential.id.slice(0, 8);
-											return (
-												<DropdownMenuSub key={credential.id}>
-													<DropdownMenuSubTrigger>
-														{credName}
-													</DropdownMenuSubTrigger>
+									: usable.map(({ credential, models }) => (
+											<DropdownMenuSub key={credential.id}>
+												<DropdownMenuSubTrigger>
+													{credentialLabel(credential)}
+												</DropdownMenuSubTrigger>
+												<DropdownMenuPortal>
 													<DropdownMenuSubContent className="max-h-60 overflow-y-auto">
 														{filterModels(models).map((m) => (
 															<DropdownMenuItem
@@ -197,13 +198,13 @@ export function LlmSelect({
 														<DropdownMenuSeparator />
 														{renderCustomField(type, credential.id)}
 													</DropdownMenuSubContent>
-												</DropdownMenuSub>
-											);
-										})}
+												</DropdownMenuPortal>
+											</DropdownMenuSub>
+										))}
 								{isSingle && (
 									<>
 										<DropdownMenuSeparator />
-										{renderCustomField(type, items[0].credential.id)}
+										{renderCustomField(type, usable[0].credential.id)}
 									</>
 								)}
 							</DropdownMenuGroup>

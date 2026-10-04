@@ -251,6 +251,34 @@ class TestDashScopeNonStream(IsolatedAsyncioTestCase):
             ),
         )
 
+    async def test_extra_body_is_not_mutated(self) -> None:
+        """Model defaults do not mutate the caller-owned extra body."""
+        mock_create = AsyncMock(
+            return_value=_mock_completion(text="Hello!"),
+        )
+        self.mock_client.chat.completions.create = mock_create
+        extra_body = {"custom": "value"}
+
+        await self.model([], extra_body=extra_body)
+
+        self.assertEqual(
+            (extra_body, mock_create.await_args.kwargs),
+            (
+                {"custom": "value"},
+                {
+                    "model": "qwen3-max",
+                    "messages": [],
+                    "stream": False,
+                    "max_tokens": 1000,
+                    "extra_body": {
+                        "custom": "value",
+                        "enable_thinking": True,
+                        "thinking_budget": 100,
+                    },
+                },
+            ),
+        )
+
 
 # ---------------------------------------------------------------------------
 # Streaming tests
@@ -552,6 +580,56 @@ class TestDashScopeStream(IsolatedAsyncioTestCase):
             self.assertEqual(wav.getframerate(), 24000)
             frames = wav.readframes(wav.getnframes())
         self.assertEqual(frames, pcm_full)
+
+    async def test_stream_audio_transcript_yields_text(
+        self,
+    ) -> None:
+        """An omni audio transcript is emitted as text, not dropped.
+
+        Omni models send the spoken text in ``delta.audio.transcript``
+        instead of ``delta.content``, so the parser has to pick it up for
+        the agent to receive what the model said.
+        """
+        pcm = bytes([1, 2, 3, 4])
+        chunks = [
+            _make_stream_chunk(
+                delta_audio={
+                    "data": base64.b64encode(pcm).decode(),
+                    "transcript": "Hello",
+                },
+            ),
+            _make_stream_chunk(
+                delta_audio={
+                    "data": base64.b64encode(pcm).decode(),
+                    "transcript": "Hello",
+                },
+            ),
+            _make_stream_chunk(
+                has_choices=False,
+                usage={"prompt_tokens": 5, "completion_tokens": 3},
+            ),
+        ]
+        mock_create = AsyncMock(return_value=_MockAsyncStream(chunks))
+        self.mock_client.chat.completions.create = mock_create
+
+        gen = await self.model([])
+        responses = [r async for r in gen]
+
+        # The transcript is folded into the same text block, so the final
+        # response carries it concatenated.
+        final = responses[-1]
+        self.assertTrue(final.is_last)
+        texts = [b.text for b in final.content if isinstance(b, TextBlock)]
+        self.assertEqual("".join(texts), "HelloHello")
+
+        # The audio stream itself is untouched: one stable id across chunks.
+        audio_ids = {
+            b.id
+            for r in responses
+            for b in r.content
+            if isinstance(b, DataBlock)
+        }
+        self.assertEqual(len(audio_ids), 1)
 
 
 # ---------------------------------------------------------------------------

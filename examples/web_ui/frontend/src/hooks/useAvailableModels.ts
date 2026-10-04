@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useQuery } from '@tanstack/react-query';
 
 import { credentialApi, modelApi } from '@/api';
 import type { CredentialView, ModelCard } from '@/api';
@@ -8,75 +8,61 @@ export interface CredentialWithModels {
 	models: ModelCard[];
 }
 
-type Groups = Record<string, CredentialWithModels[]>;
-
-const CACHE_TTL_MS = 5 * 60_000;
-let cached: { at: number; data: Groups } | null = null;
-let inflight: Promise<Groups> | null = null;
-
-async function loadGroups(): Promise<Groups> {
-	if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
-		return cached.data;
-	}
-	if (!inflight) {
-		inflight = (async () => {
-			const { credentials } = await credentialApi.list({ silent: true });
-			const result: Groups = {};
-			await Promise.all(
-				credentials.map(async (credential) => {
-					const type = credential.data.type as string | undefined;
-					if (!type) return;
-					if (!result[type]) result[type] = [];
-					try {
-						const { models } = await modelApi.list(type, credential.id);
-						result[type].push({ credential, models });
-					} catch {
-						result[type].push({ credential, models: [] });
-					}
-				}),
-			);
-			cached = { at: Date.now(), data: result };
-			return result;
-		})().finally(() => {
-			inflight = null;
-		});
-	}
-	return inflight;
-}
-
 /**
  * Fetches all credentials and their available models, grouped by provider type.
  * Provider type is read from `credential.data.type`.
  * Credentials without a `type` field or whose model fetch fails are silently skipped.
  *
- * Chat, the LLM picker and the parameter popover all call this hook;
- * they share one in-flight request so the browser does not exhaust
- * HTTP/1.1's 6-connection-per-host limit (the session SSE stream
- * already occupies one slot).
+ * One credential list plus one model list per provider — the most expensive
+ * fan-out on the page, and every model picker in the app mounts it. Cached
+ * under the shared default window and re-fetched on demand through
+ * `refetch`, which is what the "credential just added" trigger calls.
  */
+async function fetchGroups(): Promise<Record<string, CredentialWithModels[]>> {
+	const { credentials } = await credentialApi.list({ silent: true });
+	const result: Record<string, CredentialWithModels[]> = {};
+
+	await Promise.all(
+		credentials.map(async (credential) => {
+			const type = credential.data.type as string | undefined;
+			if (!type) return;
+			if (!result[type]) result[type] = [];
+			try {
+				const { models } = await modelApi.list(type, credential.id);
+				// Reverse-alphabetical, which is how the providers' naming
+				// schemes rank themselves — gpt-5 before gpt-4, qwen3 before
+				// qwen2 — so the strongest models sit at the top of the picker.
+				result[type].push({
+					credential,
+					models: [...models].sort((a, b) =>
+						b.name.localeCompare(a.name, undefined, { numeric: true }),
+					),
+				});
+			} catch {
+				result[type].push({ credential, models: [] });
+			}
+		}),
+	);
+
+	return result;
+}
+
+/**
+ * Cache key for the grouped model list. Exported so a credential change —
+ * which moves what these groups contain — can invalidate it.
+ */
+export const AVAILABLE_MODELS_KEY = ['available-models'];
+
 export function useAvailableModels() {
-	const [groups, setGroups] = useState<Groups>(cached?.data ?? {});
-	const [loading, setLoading] = useState(!cached);
-	const [error, setError] = useState<Error | null>(null);
+	const { data, isPending, error, refetch } = useQuery({
+		queryKey: AVAILABLE_MODELS_KEY,
+		queryFn: fetchGroups,
+	});
 
-	const refetch = useCallback(async (force = false) => {
-		if (force) cached = null;
-		const fresh = cached && Date.now() - cached.at < CACHE_TTL_MS;
-		if (!fresh) setLoading(true);
-		setError(null);
-		try {
-			const result = await loadGroups();
-			setGroups(result);
-		} catch (e) {
-			setError(e as Error);
-		} finally {
-			setLoading(false);
-		}
-	}, []);
-
-	useEffect(() => {
-		void refetch();
-	}, [refetch]);
-
-	return { groups, loading, error, refetch };
+	return {
+		groups: data ?? {},
+		loading: isPending,
+		error: error as Error | null,
+		refetch: () => void refetch(),
+	};
 }

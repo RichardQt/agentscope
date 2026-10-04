@@ -7,6 +7,8 @@ dicts), a lightweight xai_sdk stub is built at module load so that tests run
 without the real package.  The stub objects support __eq__ and __repr__ so
 full assertListEqual comparisons work.
 """
+import os
+import re
 import sys
 from typing import Any
 from types import ModuleType
@@ -21,6 +23,7 @@ from agentscope.message import (
     TextBlock,
     DataBlock,
     Base64Source,
+    URLSource,
     ToolCallBlock,
     ToolResultBlock,
     ThinkingBlock,
@@ -181,7 +184,9 @@ def _build_xai_sdk_stub() -> None:
 _build_xai_sdk_stub()
 
 
-class TestXAIFormatter(IsolatedAsyncioTestCase):
+class TestXAIFormatter(  # pylint: disable=too-many-public-methods
+    IsolatedAsyncioTestCase,
+):
     """Comprehensive tests for XAI Chat and MultiAgent formatters.
 
     The stub objects support __eq__, so full assertListEqual works for
@@ -311,6 +316,87 @@ class TestXAIFormatter(IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_chat_formatter_tool_result_with_url_media(self) -> None:
+        """URL media in a tool result becomes a placeholder with its URL."""
+        fmt = XAIChatFormatter()
+        res = await fmt.format(
+            [
+                AssistantMsg(
+                    name="assistant",
+                    content=[
+                        ToolResultBlock(
+                            id="call_1",
+                            name="screenshot",
+                            output=[
+                                TextBlock(text="done"),
+                                DataBlock(
+                                    source=URLSource(
+                                        url="https://example.com/a.png",
+                                        media_type="image/png",
+                                    ),
+                                ),
+                            ],
+                            state=ToolResultState.SUCCESS,
+                        ),
+                    ],
+                ),
+            ],
+        )
+        self.assertListEqual(
+            res,
+            [
+                tool_result(
+                    "done\n<system-reminder>A(n) image file is returned "
+                    "and can be accessed at the URL: "
+                    "https://example.com/a.png.</system-reminder>",
+                    tool_call_id="call_1",
+                ),
+            ],
+        )
+
+    async def test_chat_formatter_tool_result_with_base64_media(
+        self,
+    ) -> None:
+        """Base64 media in a tool result is saved to a file, not dumped."""
+        fmt = XAIChatFormatter()
+        res = await fmt.format(
+            [
+                AssistantMsg(
+                    name="assistant",
+                    content=[
+                        ToolResultBlock(
+                            id="call_1",
+                            name="screenshot",
+                            output=[
+                                DataBlock(
+                                    source=Base64Source(
+                                        data="iVBORw0KGgo=",
+                                        media_type="image/png",
+                                    ),
+                                ),
+                            ],
+                            state=ToolResultState.SUCCESS,
+                        ),
+                    ],
+                ),
+            ],
+        )
+        path = re.search(
+            r"saved locally at: (.+)\.</system-reminder>",
+            res[0].args[0],
+        ).group(1)
+        os.unlink(path)
+        self.assertListEqual(
+            res,
+            [
+                tool_result(
+                    "<system-reminder>A(n) image file is returned and "
+                    f"saved locally at: {path}.</system-reminder>",
+                    tool_call_id="call_1",
+                ),
+            ],
+        )
+
     async def test_chat_formatter_thinking_dropped(self) -> None:
         """ThinkingBlock is silently ignored in user/assistant xAI
         messages."""
@@ -332,6 +418,28 @@ class TestXAIFormatter(IsolatedAsyncioTestCase):
         fmt = XAIChatFormatter()
         res = await fmt.format([])
         self.assertListEqual([], res)
+
+    async def test_chat_formatter_respects_image_input_types(self) -> None:
+        """Only image media types declared in input_types are forwarded."""
+        msg = UserMsg(
+            name="user",
+            content=[
+                DataBlock(
+                    source=Base64Source(
+                        data="R0lGODlh",
+                        media_type="image/gif",
+                    ),
+                ),
+            ],
+        )
+
+        self.assertListEqual([], await XAIChatFormatter().format([msg]))
+        self.assertListEqual(
+            [user(image("data:image/gif;base64,R0lGODlh"))],
+            await XAIChatFormatter(
+                input_types=["text/plain", "image/*"],
+            ).format([msg]),
+        )
 
     # -------------------------------------------------------------------
     # XAIMultiAgentFormatter tests
@@ -415,6 +523,81 @@ class TestXAIFormatter(IsolatedAsyncioTestCase):
         fmt = XAIMultiAgentFormatter()
         res = await fmt.format([])
         self.assertListEqual([], res)
+
+    async def test_multiagent_formatter_history_keeps_images(self) -> None:
+        """Images of the collapsed messages ride along with the history
+        text, in message order."""
+        fmt = XAIMultiAgentFormatter()
+        msgs = [
+            UserMsg(
+                name="user",
+                content=[
+                    TextBlock(text="Compare these two charts."),
+                    DataBlock(
+                        source=Base64Source(
+                            data="Zmlyc3Q=",
+                            media_type="image/jpeg",
+                        ),
+                    ),
+                ],
+            ),
+            AssistantMsg(
+                name="agent",
+                content=[
+                    TextBlock(text="The second one differs."),
+                    DataBlock(
+                        source=URLSource(
+                            url="https://example.com/second.png",
+                            media_type="image/png",
+                        ),
+                    ),
+                ],
+            ),
+        ]
+        res = await fmt.format(msgs)
+        self.assertListEqual(
+            [
+                user(
+                    self._hist_prompt + "<history>\n"
+                    "user: Compare these two charts.\n"
+                    "agent: The second one differs.\n"
+                    "</history>",
+                    image("data:image/jpeg;base64,Zmlyc3Q="),
+                    image("https://example.com/second.png"),
+                ),
+            ],
+            res,
+        )
+
+    async def test_multiagent_history_respects_image_input_types(self) -> None:
+        """Collapsed history does not forward undeclared image types."""
+        fmt = XAIMultiAgentFormatter()
+        msgs = [
+            UserMsg(
+                name="user",
+                content=[
+                    TextBlock(text="Inspect this animation."),
+                    DataBlock(
+                        source=Base64Source(
+                            data="R0lGODlh",
+                            media_type="image/gif",
+                        ),
+                    ),
+                ],
+            ),
+        ]
+
+        res = await fmt.format(msgs)
+        self.assertListEqual(
+            [
+                user(
+                    self._hist_prompt + "<history>\n"
+                    "user: Inspect this animation.\n"
+                    "</history>",
+                ),
+            ],
+            res,
+        )
 
     async def test_chat_formatter_complex_multi_step(self) -> None:
         """Complex multi-step sequence with interleaved thinking, text,

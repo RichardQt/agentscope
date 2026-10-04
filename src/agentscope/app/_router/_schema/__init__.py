@@ -2,6 +2,7 @@
 """Schema models for the agent service."""
 
 from ._channel import (
+    StartCredentialBindingRequest,
     ChannelActionResponse,
     ChannelChatId,
     ChannelChatIdsResponse,
@@ -39,6 +40,16 @@ from ._schedule import (
     ScheduleSessionsResponse,
     UpdateScheduleRequest,
 )
+from ._sop import (
+    CreateSOPRequest,
+    CreateSOPResponse,
+    ListSOPRunsResponse,
+    ListSOPsResponse,
+    SOPSchemaResponse,
+    StartSOPRunRequest,
+    SubmitVerdictRequest,
+    UpdateSOPRequest,
+)
 from ._agent import (
     AgentSchemaResponse,
     AgentSchemaV2Response,
@@ -55,13 +66,17 @@ from ._credential import (
     ListCredentialSchemasResponse,
 )
 from ._knowledge_base import (
+    ChunkerInfo,
     CreateKnowledgeBaseRequest,
     CreateKnowledgeBaseResponse,
     KbEmbeddingProvider,
     KbMiddlewareParametersSchemaResponse,
     KnowledgeDocumentView,
+    ListChunkersResponse,
     ListKbEmbeddingModelsResponse,
     ListKnowledgeBasesResponse,
+    ListDocumentChunksResponse,
+    DocumentDownloadTokenResponse,
     ListKnowledgeDocumentsResponse,
     ListKnowledgeDocumentStatusResponse,
     ListSupportedContentTypesResponse,
@@ -105,6 +120,14 @@ __all__ = [
     "MCPClientStatus",
     "ToolInfo",
     # Agent
+    "CreateSOPRequest",
+    "CreateSOPResponse",
+    "ListSOPRunsResponse",
+    "ListSOPsResponse",
+    "SOPSchemaResponse",
+    "StartSOPRunRequest",
+    "SubmitVerdictRequest",
+    "UpdateSOPRequest",
     "AgentSchemaResponse",
     "AgentSchemaV2Response",
     "ListAgentsResponse",
@@ -119,6 +142,7 @@ __all__ = [
     "ChannelResponse",
     "ChannelSessionsResponse",
     "CreateChannelRequest",
+    "StartCredentialBindingRequest",
     "UpdateChannelRequest",
     # Chat
     "ChatRequest",
@@ -130,13 +154,17 @@ __all__ = [
     "ListCredentialsResponse",
     "ListCredentialSchemasResponse",
     # Knowledge base
+    "ChunkerInfo",
     "CreateKnowledgeBaseRequest",
     "CreateKnowledgeBaseResponse",
     "KbEmbeddingProvider",
     "KbMiddlewareParametersSchemaResponse",
     "KnowledgeDocumentView",
+    "ListChunkersResponse",
     "ListKbEmbeddingModelsResponse",
     "ListKnowledgeBasesResponse",
+    "ListDocumentChunksResponse",
+    "DocumentDownloadTokenResponse",
     "ListKnowledgeDocumentsResponse",
     "ListKnowledgeDocumentStatusResponse",
     "ListSupportedContentTypesResponse",

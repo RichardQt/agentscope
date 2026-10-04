@@ -6,6 +6,8 @@ from unittest.async_case import IsolatedAsyncioTestCase
 
 import fakeredis.aioredis
 
+from utils import AnyString
+
 from agentscope.app.storage import (
     RedisStorage,
     AgentRecord,
@@ -14,9 +16,16 @@ from agentscope.app.storage import (
     ChatModelConfig,
     ScheduleRecord,
     ScheduleData,
-    SessionSource,
+    ChannelOrigin,
+    ScheduleOrigin,
     TeamData,
+    TeamMember,
     TeamRecord,
+    SOPAgentRef,
+    SOPData,
+    SOPRecord,
+    SOPRunRecord,
+    SOPStepDataV1,
 )
 from agentscope.app.storage import MCPRecord, SkillRecord
 from agentscope.credential import OllamaCredential
@@ -24,6 +33,7 @@ from agentscope.mcp import HttpMCPConfig, MCPClient
 from agentscope.app.storage import AgentData
 from agentscope.agent import ContextConfig, ReActConfig
 from agentscope.message import UserMsg, AssistantMsg, TextBlock
+from agentscope.sop import SOPPhase, SOPRunState, SOPStepRunState
 from agentscope.state import AgentState
 
 
@@ -655,8 +665,7 @@ class TestScheduleSession(IsolatedAsyncioTestCase):
             self.user_id,
             self.agent_id,
             make_session_config(),
-            source=SessionSource.SCHEDULE,
-            source_schedule_id=schedule.id,
+            origin=ScheduleOrigin(schedule_id=schedule.id),
         )
 
         results = await self.storage.list_sessions_by_schedule(
@@ -665,7 +674,10 @@ class TestScheduleSession(IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].id, session.id)
-        self.assertEqual(results[0].source_schedule_id, schedule.id)
+        self.assertEqual(
+            results[0].origin,
+            ScheduleOrigin(schedule_id=schedule.id),
+        )
 
     async def test_list_sessions_by_schedule_empty(self) -> None:
         """Returns empty list when no sessions exist for a schedule."""
@@ -685,8 +697,7 @@ class TestScheduleSession(IsolatedAsyncioTestCase):
             self.user_id,
             self.agent_id,
             make_session_config(),
-            source=SessionSource.SCHEDULE,
-            source_schedule_id=schedule.id,
+            origin=ScheduleOrigin(schedule_id=schedule.id),
         )
 
         agent_sessions = await self.storage.list_sessions(
@@ -705,15 +716,13 @@ class TestScheduleSession(IsolatedAsyncioTestCase):
             self.user_id,
             self.agent_id,
             make_session_config(),
-            source=SessionSource.SCHEDULE,
-            source_schedule_id=schedule.id,
+            origin=ScheduleOrigin(schedule_id=schedule.id),
         )
         await self.storage.upsert_session(
             self.user_id,
             self.agent_id,
             make_session_config(),
-            source=SessionSource.SCHEDULE,
-            source_schedule_id=schedule.id,
+            origin=ScheduleOrigin(schedule_id=schedule.id),
         )
 
         await self.storage.delete_schedule(self.user_id, schedule.id)
@@ -739,8 +748,7 @@ class TestScheduleSession(IsolatedAsyncioTestCase):
             self.user_id,
             self.agent_id,
             make_session_config(),
-            source=SessionSource.SCHEDULE,
-            source_schedule_id=schedule.id,
+            origin=ScheduleOrigin(schedule_id=schedule.id),
         )
 
         await self.storage.delete_session(
@@ -1134,6 +1142,55 @@ class TestTeamCascade(IsolatedAsyncioTestCase):
         self.assertIsNotNone(leader)
         self.assertIsNone(leader.team_id)
 
+    async def test_delete_team_removes_cross_owner_borrowed_session(
+        self,
+    ) -> None:
+        """An invited definition owner differs from its session owner."""
+        definition_owner = "user-2"
+        invited = make_agent_record(definition_owner)
+        await self.storage.upsert_agent(definition_owner, invited)
+        owner_session = await self.storage.upsert_session(
+            definition_owner,
+            invited.id,
+            make_session_config("owner-private-workspace"),
+        )
+        borrowed = await self.storage.upsert_session(
+            self.user_id,
+            invited.id,
+            make_session_config("viewer-borrowed-workspace"),
+        )
+        self.team.data.members = [
+            TeamMember(
+                owner_id=definition_owner,
+                agent_id=invited.id,
+                session_id=borrowed.id,
+                role="invited",
+            ),
+        ]
+        self.team.data.member_ids = [invited.id]
+        await self.storage.upsert_team(self.user_id, self.team)
+
+        self.assertTrue(
+            await self.storage.delete_team(self.user_id, self.team.id),
+        )
+        self.assertIsNone(
+            await self.storage.get_session(
+                self.user_id,
+                invited.id,
+                borrowed.id,
+            ),
+        )
+        self.assertIsNotNone(
+            await self.storage.get_session(
+                definition_owner,
+                invited.id,
+                owner_session.id,
+            ),
+        )
+        self.assertIsNotNone(
+            await self.storage.get_agent(definition_owner, invited.id),
+        )
+
     async def test_delete_leader_session_dissolves_team(self) -> None:
         """Deleting a leader session auto-dissolves its team."""
         await self.storage.delete_session(
@@ -1517,4 +1574,370 @@ class TestSkill(IsolatedAsyncioTestCase):
         self.assertEqual(
             len(await self.storage.list_skills(self.user_id)),
             1,
+        )
+
+
+class TestChannelSessionIndex(IsolatedAsyncioTestCase):
+    """The channel index, which the tagged union now drives.
+
+    It used to be written from a nullable ``source_channel_id``; it is
+    now written from a ``ChannelOrigin``, and the schedule path's
+    coverage says nothing about it.
+    """
+
+    async def asyncSetUp(self) -> None:
+        """Set up test fixtures."""
+        self.storage = make_storage()
+        self.user_id = "user-1"
+        self.agent_id = "agent-1"
+
+    async def test_a_channel_session_is_indexed_and_unindexed(self) -> None:
+        """It is found by its channel, and gone once the session is."""
+        session = await self.storage.upsert_session(
+            self.user_id,
+            self.agent_id,
+            make_session_config(),
+            origin=ChannelOrigin(
+                channel_id="chan-1",
+                chat_id="chat-1",
+                chat_name="产品群",
+            ),
+        )
+
+        found = await self.storage.list_sessions_by_channel(
+            self.user_id,
+            "chan-1",
+        )
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].id, session.id)
+        self.assertEqual(
+            found[0].origin,
+            ChannelOrigin(
+                channel_id="chan-1",
+                chat_id="chat-1",
+                chat_name="产品群",
+            ),
+        )
+
+        await self.storage.delete_session(
+            self.user_id,
+            self.agent_id,
+            session.id,
+        )
+
+        self.assertEqual(
+            await self.storage.list_sessions_by_channel(
+                self.user_id,
+                "chan-1",
+            ),
+            [],
+        )
+
+    async def test_a_session_from_elsewhere_is_not_indexed(self) -> None:
+        """Only a ChannelOrigin goes into the channel index."""
+        await self.storage.upsert_session(
+            self.user_id,
+            self.agent_id,
+            make_session_config(),
+        )
+        self.assertEqual(
+            await self.storage.list_sessions_by_channel(
+                self.user_id,
+                "chan-1",
+            ),
+            [],
+        )
+
+
+# A procedure needs at least one milestone, so the fixtures that only
+# care about the record around it still carry one.
+_A_STEP = SOPStepDataV1(
+    subject="model",
+    description="make the hull",
+    executor=SOPAgentRef(agent_id="a-1", session_key="modeller"),
+)
+
+
+def make_sop_record(user_id: str) -> SOPRecord:
+    """A one-step procedure."""
+    return SOPRecord(
+        user_id=user_id,
+        data=SOPData(
+            name="ship",
+            description="build one",
+            steps=[
+                SOPStepDataV1(
+                    subject="model",
+                    description="make the hull",
+                    executor=SOPAgentRef(
+                        agent_id="agent-1",
+                        session_key="modeller",
+                    ),
+                ),
+            ],
+        ),
+    )
+
+
+class TestSOP(IsolatedAsyncioTestCase):
+    """Tests for SOP and SOP run CRUD."""
+
+    async def asyncSetUp(self) -> None:
+        """Set up test fixtures."""
+        self.storage = make_storage()
+        self.user_id = "user-1"
+
+    async def test_round_trip(self) -> None:
+        """A stored procedure comes back whole."""
+        record = make_sop_record(self.user_id)
+        await self.storage.upsert_sop(self.user_id, record)
+
+        fetched = await self.storage.get_sop(self.user_id, record.id)
+
+        self.maxDiff = None
+        self.assertDictEqual(
+            fetched.model_dump(mode="json"),
+            {
+                "id": AnyString(),
+                "created_at": AnyString(),
+                "updated_at": AnyString(),
+                "user_id": "user-1",
+                "data": {
+                    "name": "ship",
+                    "description": "build one",
+                    "steps": [
+                        {
+                            "version": "v1",
+                            "subject": "model",
+                            "description": "make the hull",
+                            "executor": {
+                                "agent_id": "agent-1",
+                                "session_key": "modeller",
+                            },
+                            "verifier": None,
+                            "max_attempts": 3,
+                        },
+                    ],
+                    "workspace_grain": "run",
+                    "session_settings": {},
+                },
+            },
+        )
+        self.assertEqual(
+            [_.id for _ in await self.storage.list_sops(self.user_id)],
+            [record.id],
+        )
+
+    async def test_user_isolation(self) -> None:
+        """One user's procedures are invisible to another."""
+        record = make_sop_record("user-A")
+        await self.storage.upsert_sop("user-A", record)
+
+        self.assertEqual(await self.storage.list_sops("user-B"), [])
+        self.assertIsNone(await self.storage.get_sop("user-B", record.id))
+
+    async def test_delete(self) -> None:
+        """Deleting twice reports the second as a miss."""
+        record = make_sop_record(self.user_id)
+        await self.storage.upsert_sop(self.user_id, record)
+
+        self.assertTrue(await self.storage.delete_sop(self.user_id, record.id))
+        self.assertFalse(
+            await self.storage.delete_sop(self.user_id, record.id),
+        )
+        self.assertEqual(await self.storage.list_sops(self.user_id), [])
+
+    async def test_runs_are_listed_by_procedure_and_phase(self) -> None:
+        """The per-procedure index narrows the read; phase filters after."""
+        waiting = SOPRunRecord(
+            user_id=self.user_id,
+            sop_id="sop-1",
+            definition=SOPData(name="a", steps=[_A_STEP]),
+            state=SOPRunState(
+                steps=[SOPStepRunState(phase=SOPPhase.AWAITING)],
+            ),
+        )
+        done = SOPRunRecord(
+            user_id=self.user_id,
+            sop_id="sop-1",
+            definition=SOPData(name="a", steps=[_A_STEP]),
+            state=SOPRunState(
+                steps=[SOPStepRunState(phase=SOPPhase.COMPLETED)],
+            ),
+        )
+        other = SOPRunRecord(
+            user_id=self.user_id,
+            sop_id="sop-2",
+            definition=SOPData(name="b", steps=[_A_STEP]),
+            state=SOPRunState(
+                steps=[SOPStepRunState(phase=SOPPhase.AWAITING)],
+            ),
+        )
+        for record in (waiting, done, other):
+            await self.storage.upsert_sop_run(self.user_id, record)
+
+        self.assertEqual(
+            {
+                _.id
+                for _ in await self.storage.list_sop_runs(
+                    self.user_id,
+                    sop_id="sop-1",
+                )
+            },
+            {waiting.id, done.id},
+        )
+        self.assertEqual(
+            {
+                _.id
+                for _ in await self.storage.list_sop_runs(
+                    self.user_id,
+                    phase=SOPPhase.AWAITING,
+                )
+            },
+            {waiting.id, other.id},
+        )
+
+    async def test_update_run_writes_state_and_sessions(self) -> None:
+        """The hot path rewrites what moves and keeps the snapshot."""
+        run = SOPRunRecord(
+            user_id=self.user_id,
+            sop_id="sop-1",
+            definition=SOPData(name="ship", steps=[_A_STEP]),
+            state=SOPRunState(steps=[SOPStepRunState()]),
+        )
+        await self.storage.upsert_sop_run(self.user_id, run)
+
+        await self.storage.update_sop_run(
+            self.user_id,
+            run.id,
+            SOPRunState(steps=[SOPStepRunState(phase=SOPPhase.AWAITING)]),
+            sessions={"modeller": "session-1"},
+        )
+
+        updated = await self.storage.get_sop_run(self.user_id, run.id)
+
+        self.maxDiff = None
+        self.assertDictEqual(
+            updated.model_dump(mode="json"),
+            {
+                "id": run.id,
+                "created_at": AnyString(),
+                "updated_at": AnyString(),
+                "user_id": "user-1",
+                "sop_id": "sop-1",
+                "definition": {
+                    "name": "ship",
+                    "description": "",
+                    "steps": [
+                        {
+                            "version": "v1",
+                            "subject": "model",
+                            "description": "make the hull",
+                            "executor": {
+                                "agent_id": "a-1",
+                                "session_key": "modeller",
+                            },
+                            "verifier": None,
+                            "max_attempts": 3,
+                        },
+                    ],
+                    "workspace_grain": "run",
+                    "session_settings": {},
+                },
+                "sessions": {"modeller": "session-1"},
+                "state": {
+                    "id": AnyString(),
+                    "inputs": [],
+                    "steps": [
+                        {
+                            "phase": "awaiting",
+                            "given": [],
+                            "submission": None,
+                            "verifications": [],
+                        },
+                    ],
+                    "created_at": AnyString(),
+                    "phase": "awaiting",
+                },
+            },
+        )
+
+        with self.assertRaises(KeyError):
+            await self.storage.update_sop_run(
+                self.user_id,
+                "no-such-id",
+                SOPRunState(),
+            )
+
+    async def test_deleting_a_sop_takes_its_runs_with_it(self) -> None:
+        """A run is only readable through the definition it snapshotted."""
+        sop = make_sop_record(self.user_id)
+        await self.storage.upsert_sop(self.user_id, sop)
+        run = SOPRunRecord(
+            user_id=self.user_id,
+            sop_id=sop.id,
+            definition=sop.data,
+        )
+        await self.storage.upsert_sop_run(self.user_id, run)
+
+        await self.storage.delete_sop(self.user_id, sop.id)
+
+        self.assertIsNone(await self.storage.get_sop_run(self.user_id, run.id))
+        self.assertEqual(await self.storage.list_sop_runs(self.user_id), [])
+
+    async def test_deleting_a_run_takes_its_sessions(self) -> None:
+        """The run minted them, so none is left behind to be woken."""
+        await self.storage.upsert_agent(
+            self.user_id,
+            make_agent_record(self.user_id),
+        )
+        agents = await self.storage.list_agents(self.user_id)
+        session = await self.storage.upsert_session(
+            user_id=self.user_id,
+            agent_id=agents[0].id,
+            config=SessionConfig(workspace_id="ws-1"),
+        )
+        run = SOPRunRecord(
+            user_id=self.user_id,
+            sop_id="sop-1",
+            definition=SOPData(name="ship", steps=[_A_STEP]),
+            sessions={"modeller": session.id},
+        )
+        await self.storage.upsert_sop_run(self.user_id, run)
+
+        self.assertTrue(
+            await self.storage.delete_sop_run(self.user_id, run.id),
+        )
+
+        self.assertIsNone(
+            await self.storage.get_session(
+                self.user_id,
+                agents[0].id,
+                session.id,
+            ),
+        )
+
+    async def test_a_step_state_subclass_survives_redis(self) -> None:
+        """What a step kept beyond the base record is stored, not trimmed."""
+        run = SOPRunRecord(
+            user_id=self.user_id,
+            sop_id="sop-1",
+            definition=SOPData(name="ship", steps=[_A_STEP]),
+            state=SOPRunState(
+                steps=[SOPStepRunState(phase=SOPPhase.AWAITING, call_id="c1")],
+            ),
+        )
+        await self.storage.upsert_sop_run(self.user_id, run)
+
+        fetched = await self.storage.get_sop_run(self.user_id, run.id)
+
+        self.assertDictEqual(
+            fetched.state.steps[0].model_dump(mode="json"),
+            {
+                "phase": "awaiting",
+                "given": [],
+                "submission": None,
+                "verifications": [],
+                "call_id": "c1",
+            },
         )
