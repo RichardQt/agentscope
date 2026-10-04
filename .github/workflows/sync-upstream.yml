@@ -40,20 +40,58 @@ jobs:
           git remote add upstream https://github.com/agentscope-ai/agentscope.git
           git fetch upstream main
 
-          if git merge-base --is-ancestor upstream/main HEAD; then
-            echo "status=up-to-date" >> "$GITHUB_OUTPUT"
+          # This fork only keeps sync-upstream.yml. Drop anything upstream
+          # adds under .github/workflows, and treat a conflict there as
+          # "keep it deleted" so the daily merge can still finish.
+          drop_other_workflows() {
+            find .github/workflows -type f ! -name 'sync-upstream.yml' -delete
+            git add -A .github/workflows
+          }
+
+          changed=false
+          if ! git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Upstream is $(git rev-list --count HEAD..upstream/main) commit(s) ahead."
+            if ! git merge --no-edit upstream/main \
+                -m "Merge upstream agentscope-ai/agentscope main"; then
+              : > "$RUNNER_TEMP/conflicts.txt"
+              while IFS= read -r path; do
+                [ -n "$path" ] || continue
+                case "$path" in
+                  .github/workflows/sync-upstream.yml)
+                    git checkout --ours -- "$path"
+                    git add -- "$path"
+                    ;;
+                  .github/workflows/*)
+                    git rm -f -- "$path"
+                    ;;
+                  *)
+                    echo "$path" >> "$RUNNER_TEMP/conflicts.txt"
+                    ;;
+                esac
+              done < <(git diff --name-only --diff-filter=U)
+
+              if [ -s "$RUNNER_TEMP/conflicts.txt" ]; then
+                git merge --abort
+                echo "status=conflict" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              git commit --no-edit
+            fi
+            changed=true
+          else
             echo "Already up to date with upstream/main."
-            exit 0
           fi
 
-          echo "Upstream is $(git rev-list --count HEAD..upstream/main) commit(s) ahead."
-          if git merge --no-edit upstream/main \
-              -m "Merge upstream agentscope-ai/agentscope main"; then
+          drop_other_workflows
+          if ! git diff --cached --quiet; then
+            git commit -m "ci: keep only the upstream sync workflow"
+            changed=true
+          fi
+
+          if [ "$changed" = true ]; then
             echo "status=merged" >> "$GITHUB_OUTPUT"
           else
-            git diff --name-only --diff-filter=U > "$RUNNER_TEMP/conflicts.txt"
-            git merge --abort
-            echo "status=conflict" >> "$GITHUB_OUTPUT"
+            echo "status=up-to-date" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Push main
